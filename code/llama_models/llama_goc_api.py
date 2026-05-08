@@ -1,3 +1,17 @@
+"""
+LLaMA Graph-of-Cues (GoC) sarcasm detection script.
+
+High-level pipeline:
+1) For each input text, define a set of cue types (optionally filtered by ablation).
+2) Use the LLM to extract cue text for each cue type.
+3) Build a cue graph where nodes are cue types and edges connect cue pairs.
+4) Iteratively evaluate whether current cues are sufficient; if not, select the next cue.
+5) Generate final sarcasm label text, map it to binary prediction, and evaluate.
+
+This is a dynamic reasoning strategy: the model does not always use all cues up front,
+but can progressively expand evidence based on cue sufficiency checks.
+"""
+
 from langchain.chains.llm import LLMChain
 import networkx as nx
 import random
@@ -25,8 +39,7 @@ logger = logging.getLogger(__name__)
 from langchain_huggingface import HuggingFaceEndpoint
 
 def configure_pipeline(token):
-   
-
+    # Configure remote LLaMA inference endpoint through LangChain.
     llm = HuggingFaceEndpoint(
     repo_id="meta-llama/Meta-Llama-3-8B-Instruct",
     task="text-generation",
@@ -37,6 +50,7 @@ def configure_pipeline(token):
 
 class GoCAlgorithm(object):
     def __init__(self, text, llm, ablation_type = None):
+        # One GoC instance handles one input text and its iterative cue reasoning process.
         self.text = text
         self.llm = llm
         if ablation_type == '_wo_lin':
@@ -73,10 +87,12 @@ class GoCAlgorithm(object):
         self.cues = {}
         self.graph = nx.Graph()
         self.cue_nodes = []
+        # Step 1-2: extract cue contents, then build the cue interaction graph.
         self.extract_cues()
         self.construct_graph()
 
     def extract_cues(self):
+        # Ask the LLM to produce a short cue summary for each cue type.
         for cue_type in self.cue_types:
             cue_maker_template = f"Extract the brief {cue_type} information from the given text: {self.text}"
             cue_maker_prompt = PromptTemplate(template=cue_maker_template, input_variables=["cue_type", "text"])
@@ -84,6 +100,7 @@ class GoCAlgorithm(object):
             self.cues[cue_type] = cue_maker_chain.run(cue_type=cue_type, text=self.text)
 
     def construct_graph(self):
+        # Store extracted cues as node attributes and connect all cue nodes.
         for cue_type, cue_text in self.cues.items():
             self.graph.add_node(cue_type, text=cue_text)
             self.cue_nodes.append(cue_type)
@@ -93,6 +110,7 @@ class GoCAlgorithm(object):
         print("graph.nodes:", self.graph.nodes)
 
     def cue_evaluator(self, current_cues):
+        # Judge whether current evidence is enough to decide sarcasm polarity.
         current_cue_texts = "\n".join([self.graph.nodes[cue]['text'] for cue in current_cues])
         cue_evaluator_template = f"""
         Are the following cues sufficient to detect the sarcastic polarity of the text? Respond with 'yes' or 'no'.
@@ -113,6 +131,7 @@ class GoCAlgorithm(object):
         return evaluation
 
     def select_next_cue(self, current_cues):
+        # Select the next most informative cue; fallback to random if output is invalid.
         remaining_cues = list(set(self.graph.nodes) - set(current_cues))
         next_cue_template = f"""
         Suppose we have already had the Current cues: you shall select the next most promising or helpful cue from the following options: {remaining_cues} for sarcasm detection. Only return the cue without any other texts.
@@ -133,6 +152,7 @@ class GoCAlgorithm(object):
 
 
     def generate_result(self, current_cues):
+        # Generate final sarcasm decision conditioned on currently selected cues.
         current_cue_texts = ";".join([self.graph.nodes[cue]['text'] for cue in current_cues])
         result_template = f"""
         You can choose to output the result directly if you believe your judgment is reliable,
@@ -156,6 +176,8 @@ class GoCAlgorithm(object):
 
 
     def detect_sarcasm(self):
+        # Iterative controller:
+        # start with one random cue -> evaluate sufficiency -> add cues as needed.
         initial_cue = random.choice(self.cue_nodes)
         current_cues = [initial_cue]
         visited_nodes = set(current_cues)
@@ -178,6 +200,7 @@ class GoCAlgorithm(object):
         return result
     
 def eval_performance(y_true, y_pred, metric_path=None):
+    # Compute and report standard binary classification metrics.
 
     # Precision
     metric_dict = {}
@@ -244,6 +267,7 @@ def eval_performance(y_true, y_pred, metric_path=None):
 
 
 if __name__ == '__main__':
+    # CLI entry for GoC inference with optional cue-family ablation.
     parser = argparse.ArgumentParser(description='Running GoC based on LLaMA for sarcasm detection.')
     # parser.add_argument('--dataset_name', metavar='D', type=str, help='dataset name', default='iacv2')
     parser.add_argument('--dataset_path', metavar='F', type=str, help='dataset path', default='datasets')
@@ -259,6 +283,7 @@ if __name__ == '__main__':
     ablation_type = args.ablation_type
     task_name = args.task_name
     strategy = args.strategy
+    # Build dataset and output paths following repository naming conventions.
     dataset_path = f'{args.dataset_path}/test_{task_name}.csv'
     output_path = f'{args.output_path}/{strategy}/output_{strategy}_{task_name}{ablation_type}.csv' #f'output_toc_new/output_toc_'+ task_name +'.csv'# +'_wo_emo2.csv'
     metric_path = f'{args.metric_path}/{strategy}/metric_{strategy}_{task_name}{ablation_type}.json' #f'output_toc_new/metric_toc_'+ task_name +'.json'# +'_wo_emo2.json'
@@ -268,10 +293,12 @@ if __name__ == '__main__':
     llm = configure_pipeline(token)
 
 
+    # Load evaluation split and remove invalid rows before generation.
     df = pd.read_csv(dataset_path, encoding_errors='ignore')
     df.dropna(inplace=True)
     logger.info('generating cues...')
 
+    # Chunked execution supports resume from partial progress.
     chunk_size = int(np.ceil(len(df) / args.chunks))
     df_chunks = []
     for chunk_num in range(args.chunks):
@@ -287,7 +314,7 @@ if __name__ == '__main__':
         labels = []
         rows_to_drop = []
         for i, row in tqdm(df_chunk.iterrows(), total=len(df_chunk), desc=f"Processing chunk {chunk_num+1}/{args.chunks} for {task_name} dataset"):
-            
+            # Run full GoC reasoning for each sample, then map text output to binary label.
             goc = GoCAlgorithm(row['Text'], llm, ablation_type)
             result = goc.detect_sarcasm()
             result = result.lower().strip()
@@ -309,6 +336,7 @@ if __name__ == '__main__':
         df_chunks.append(df_chunk)
 
     logger.info("Evaluation....")
+    # Merge chunk outputs, remove temporary chunk files, and compute metrics.
     df = pd.concat(df_chunks)
     df.to_csv(output_path, index=0)
     for i in range(args.chunks):

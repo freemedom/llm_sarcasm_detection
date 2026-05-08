@@ -1,3 +1,17 @@
+"""
+LLaMA Bag-of-Cues (BoC) sarcasm detection script.
+
+High-level idea:
+1) For each sample, randomly draw multiple cue subsets from a cue pool.
+2) Build one prompt per cue subset (and per sample).
+3) Run LLM inference for each prompt variant.
+4) Convert each generation to a binary label.
+5) Aggregate labels with majority vote to obtain final prediction.
+
+This design approximates an ensemble over cue combinations and improves robustness
+against unstable generations from a single prompt.
+"""
+
 import pandas as pd
 import json
 import re
@@ -33,8 +47,7 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message
 logger = logging.getLogger(__name__)
 
 def configure_pipeline(token):
-   
-
+    # Use HuggingFaceEndpoint via LangChain to run remote text generation.
     llm = HuggingFaceEndpoint(
     repo_id="meta-llama/Meta-Llama-3-8B-Instruct",
     task="text-generation",
@@ -45,7 +58,7 @@ def configure_pipeline(token):
 
 
 def generate_BoC_prompt(data_point, cue_list, ablation_type = None):
-    # create prompts from the loaded dataset and tokenize them
+    # Standard BoC prompt template for datasets without an explicit context column.
     if ablation_type == '_wo_lin':
         ablation_text = 'Do not explicitly or implicitly use any linguistic cues.'
     elif ablation_type == '_wo_con':
@@ -70,7 +83,7 @@ def generate_BoC_prompt(data_point, cue_list, ablation_type = None):
         """
 
 def generate_BoC_MustARD_prompt(data_point, context, cue_list, ablation_type = None):
-    # create prompts from the loaded dataset and tokenize them
+    # MustARD-specific BoC template that includes dialogue/context information.
     if ablation_type == '_wo_lin':
         ablation_text = 'Do not explicitly or implicitly use any linguistic cues.'
     elif ablation_type == '_wo_con':
@@ -103,6 +116,7 @@ def get_random_cues(cue_pool, n):
 
 
 def eval_performance(y_true, y_pred, metric_path=None):
+    # Compute and print common binary classification metrics; optionally save JSON.
 
     # Precision
     metric_dict = {}
@@ -165,10 +179,12 @@ def eval_performance(y_true, y_pred, metric_path=None):
        json.dump(metric_dict,open(metric_path,'w'),indent=4)
 
 def majority_vote(labels):
+    # Aggregate multiple BoC predictions for a sample into a single final label.
     count = Counter(labels)
     return count.most_common(1)[0][0]
 
 if __name__ == '__main__':
+    # CLI entry for BoC inference and evaluation.
     parser = argparse.ArgumentParser(description='Running GoC based on LLaMA for sarcasm detection.')
     parser.add_argument('--task_name', metavar='T', type=str, help='task name', default='iacv1')
     parser.add_argument('--dataset_path', metavar='F', type=str, help='dataset path', default='datasets')
@@ -183,6 +199,7 @@ if __name__ == '__main__':
     ablation_type = args.ablation_type
     task_name = args.task_name
     strategy = args.strategy
+    # Follow repository-wide naming conventions for datasets and outputs.
     dataset_path = f'{args.dataset_path}/test_{task_name}.csv'
     output_path = f'{args.output_path}/{strategy}/output_{strategy}_{task_name}{ablation_type}_again.csv' #f'output_toc_new/output_toc_'+ task_name +'.csv'# +'_wo_emo2.csv'
     metric_path = f'{args.metric_path}/{strategy}/metric_{strategy}_{task_name}{ablation_type}_again.json' #f'output_toc_new/metric_toc_'+ task_name +'.json'# +'_wo_emo2.json'
@@ -191,9 +208,11 @@ if __name__ == '__main__':
 
     llm = configure_pipeline(token)
 
+    # Load test set and drop invalid rows before prompt construction.
     df = pd.read_csv(dataset_path, encoding_errors='ignore')
     df.dropna(inplace=True)
      
+    # Cue pool can be reduced for ablation studies (remove one cue family at a time).
     if ablation_type == '_wo_lin':
         cue_pool = {"topic", "context", "cultural background", "common knowledge", "emotional words", "special symbols", "emotional contrasts","surface emotion"}
     elif ablation_type == '_wo_con':
@@ -208,9 +227,13 @@ if __name__ == '__main__':
         Contextual cues: "topic", "context", "common knowledge" 
         Emotional cues: "emotional words", "emotional contrasts"
     '''
+    # q: number of cues included in each single BoC prompt (here: 5 cues per prompt).
+    # num_set: number of different cue subsets/prompts generated per sample (here: 3 prompts).
+    # Final prediction is the majority vote over these num_set prompt-level predictions.
     q=5
     num_set=3
 
+    # Pre-generate all BoC prompts to avoid repeated prompt construction during inference.
     for i in range(num_set):
         df[f'cue_{i}'] = [get_random_cues(cue_pool, q) for _ in range(len(df))]
         # random_cues = get_random_cues(cue_pool, q)
@@ -220,6 +243,7 @@ if __name__ == '__main__':
             df.loc[:,f'boc_prompt_{i}'] = df.apply(lambda s: generate_BoC_prompt(s['Text'],s[f'cue_{i}'],ablation_type),axis=1)
 
     
+    # Chunk-level processing supports partial resume and prevents losing full-run progress.
     chunk_size = int(np.ceil(len(df) / chunks))
     df_chunks = []
     for chunk_num in range(chunks):
@@ -230,6 +254,7 @@ if __name__ == '__main__':
             df_chunks.append(df_chunk)
             continue
         df_chunk = df[chunk_num*chunk_size:min(len(df), (chunk_num+1)*chunk_size)]
+        # For each cue set, run generation and store per-set predictions.
         for i in range(num_set):
             labels = []
             output_texts = []
@@ -253,12 +278,14 @@ if __name__ == '__main__':
                 
             df_chunk.loc[:,f'boc_output_{i}'] = output_texts
             df_chunk.loc[:,f'boc_label_{i}']= labels
+        # Final BoC decision: majority vote across prompt variants.
         df_chunk.loc[:,'pred'] = df_chunk.apply(lambda x: majority_vote([x[f'boc_label_{i}'] for i in range(num_set)]),axis=1)
         df_chunk.to_csv(chunk_file_path, index=0)
         df_chunks.append(df_chunk)
 
 
     logger.info("Evaluation....")
+    # Merge chunk results, clean temporary files, and run final evaluation.
     df = pd.concat(df_chunks)
     df.to_csv(output_path, index=0)
     for i in range(chunks):
