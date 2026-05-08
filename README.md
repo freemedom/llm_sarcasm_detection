@@ -1,6 +1,15 @@
 # llm_sarcasm_detection
 Sarcasm Detection using LLMs
 
+## What is `iacv2`?
+`iacv2` refers to the **Internet Argument Corpus (IAC) v2** sarcasm task variant used in this project.
+In this repository, `--task_name iacv2` maps to:
+
+- `datasets/sarcasm/train_iacv2.csv`
+- `datasets/sarcasm/test_iacv2.csv`
+
+These files are formatted for binary sarcasm classification (e.g., `Text`, `Label`), and many scripts use `task_name` to automatically build dataset paths like `train_{task_name}.csv` and `test_{task_name}.csv`.
+
 ## Paths
 **/code:** All codes to run GPT, Claude, Llama and Qwen models in main , k-shot and abalation experiments
 
@@ -38,6 +47,9 @@ torchrun --nproc_per_node 6 code/llama_models/train_llama_toc_hf_ddp.py
 ```python
 torchrun --nproc_per_node 6 code/qwen_models/train_qwen_toc_hf_ddp.py
 ```
+`ToC` is listed separately because it is implemented as a training/fine-tuning pipeline rather than a direct prompting pipeline.  
+Unlike `io/cot/tot/coc/goc/boc` scripts (typically single-process inference with `python`), ToC scripts use distributed training components (e.g., DDP), so they are launched with `torchrun`.  
+ToC also expects cue-augmented datasets such as `train_{task_name}_with_toc_cues.csv` and `test_{task_name}_with_toc_cues.csv`, which differ from the standard `test_{task_name}.csv` input used by most prompting baselines.
 
 ## Running GPT and Claude for Sarcasm Detection
 ```python

@@ -1,3 +1,18 @@
+"""
+LLaMA sarcasm inference script for three prompting strategies: IO, CoT, and CoC.
+
+High-level pipeline:
+1) Load a test split from `datasets/test_{task_name}.csv`.
+2) Build a strategy-specific prompt per sample (`io`, `cot`, or `coc`).
+3) Run batched generation with Hugging Face text-generation pipeline.
+4) Convert free-form outputs into binary labels via regex matching.
+5) Save predictions and compute classification metrics.
+
+Expected label mapping:
+- "not sarcastic" -> 0
+- otherwise       -> 1
+"""
+
 import pandas as pd
 import json
 import re
@@ -21,6 +36,7 @@ import torch
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 def configure_pipeline():
+    # Initialize local LLaMA-Instruct model and tokenizer for generation.
     tokenizer = AutoTokenizer.from_pretrained('meta-llama/Meta-Llama-3-8B-Instruct',cache_dir = 'llama/original')
     model = AutoModelForCausalLM.from_pretrained('meta-llama/Meta-Llama-3-8B-Instruct', cache_dir = 'llama/original')
 
@@ -36,7 +52,8 @@ def configure_pipeline():
     return pipe
 
 def generate_IO_prompt(data_point):
-    # create prompts from the loaded dataset and tokenize them
+        # create prompts from the loaded dataset and tokenize them
+    # IO: direct classification prompt (no explicit intermediate reasoning).
     if data_point:
         return f"""
         ### Instruction:
@@ -51,7 +68,8 @@ def generate_IO_prompt(data_point):
 
 
 def generate_CoT_prompt(data_point):
-    # create prompts from the loaded dataset and tokenize them
+        # create prompts from the loaded dataset and tokenize them
+    # CoT: asks the model to reason step-by-step before labeling.
     if data_point:
         return f"""
         ### Instruction:
@@ -68,7 +86,9 @@ def generate_CoT_prompt(data_point):
         """
 
 def generate_CoC_prompt(data_point):
-    # create prompts from the loaded dataset and tokenize them
+        # create prompts from the loaded dataset and tokenize them
+    # CoC: confidence-aware prompting; direct answer if confident, otherwise reason.
+    # Chain of Contradiction
     if data_point:
         return f"""
         ### Instruction:
@@ -94,6 +114,7 @@ def get_random_cues(cue_pool, n):
 
 
 def eval_performance(y_true, y_pred, metric_path=None):
+    # Compute and print standard binary classification metrics, then optionally dump JSON.
 
     # Precision
     metric_dict = {}
@@ -156,6 +177,7 @@ def eval_performance(y_true, y_pred, metric_path=None):
        json.dump(metric_dict,open(metric_path,'w'),indent=4)
 
 if __name__ == '__main__':
+    # CLI controls dataset naming and strategy selection.
     parser = argparse.ArgumentParser(description='Running io,cot or coc based on llama for sarcasm detection.')
     # parser.add_argument('--dataset_name', metavar='D', type=str, help='dataset name', default='iacv2')
     parser.add_argument('--task_name', metavar='T', type=str, help='task name', default='iacv2')
@@ -167,12 +189,15 @@ if __name__ == '__main__':
     args = parser.parse_args()
     task_name = args.task_name
     strategy = args.strategy
+    # Build canonical input/output paths from the task/strategy convention used in this repo.
     dataset_path = f'{args.dataset_path}/test_{task_name}.csv'
     output_path = f'{args.output_path}/{strategy}/output_{strategy}_{task_name}.csv' #f'output_toc_new/output_toc_'+ task_name +'.csv'# +'_wo_emo2.csv'
     metric_path = f'{args.metric_path}/{strategy}/metric_{strategy}_{task_name}.json' #f'output_toc_new/metric_toc_'+ task_name +'.json'# +'_wo_emo2.json'
+    # Legacy variable: retained from chunk-based scripts, but not used in this file.
     chunks = args.chunks
     pipe = configure_pipeline()
 
+    # Load test data and materialize prompts according to the selected strategy.
     df = pd.read_csv(dataset_path)
     
 
@@ -189,6 +214,7 @@ if __name__ == '__main__':
 
     dataset = Dataset.from_pandas(df)
 
+    # Stop generation on EOS or chat end-of-turn token.
     terminators = [
         pipe.tokenizer.eos_token_id,
         pipe.tokenizer.convert_tokens_to_ids("<|eot_id|>")
@@ -198,6 +224,7 @@ if __name__ == '__main__':
     output_texts = []
     labels = []
     
+    # Batch inference over prompts; parse textual outputs into binary predictions.
     for out in tqdm(pipe(KeyDataset(dataset, "prompt"),  
                          batch_size=64, 
                          do_sample=True,
@@ -217,6 +244,7 @@ if __name__ == '__main__':
         
     df['llm_output'] = output_texts
     df['pred'] = labels
+    # Persist per-sample outputs and run final evaluation against ground truth labels.
     df.to_csv(output_path, index=0)
     print("Evaluation....")
     eval_performance(df['Label'], df['pred'], metric_path)
