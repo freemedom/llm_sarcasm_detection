@@ -2,6 +2,7 @@
 
 This directory contains LLaMA-based sarcasm detection implementations for multiple reasoning strategies, plus a dedicated ToC (Tree-of-Cues) training pipeline.
 
+有的用的langchain，有的用的原始的transformers
 ## File-by-File Summary
 
 ### `llama_io-cot-coc.py`

@@ -1,3 +1,17 @@
+"""
+LLaMA Tree-of-Thought (ToT) style sarcasm classification via LangChain.
+
+Pipeline:
+1) Load `test_{task_name}.csv` from `--dataset_path`.
+2) For each row, run `SmartLLMChain` with `n_ideas=3` (multiple internal reasoning paths).
+3) Post-process model text: optionally strip a `**Conclusion**:` block, then map output to
+   binary labels (0 if "not sarcastic", else 1).
+4) Process in chunks with on-disk checkpoints for resume; merge, delete chunk files, evaluate.
+
+Note: `HuggingFaceEndpoint` targets Meta-Llama-3-8B-Instruct; the CLI description string
+below still mentions GPT-4o historically.
+"""
+
 import argparse
 from langchain_experimental.smart_llm import SmartLLMChain
 from langchain.prompts import PromptTemplate
@@ -22,8 +36,7 @@ logger = logging.getLogger(__name__)
 
 
 def configure_pipeline():
-   
-
+    # Remote LLaMA endpoint for text generation (LangChain wrapper).
     llm = HuggingFaceEndpoint(
     repo_id="meta-llama/Meta-Llama-3-8B-Instruct",
     task="text-generation",
@@ -33,7 +46,8 @@ def configure_pipeline():
     return llm
 
 def generate_ToT_prompt(llm, data_point):
-
+  # SmartLLMChain expands the task into multiple candidate ideas (n_ideas=3) before synthesis.
+  # The input text is embedded in the template; chain.run({}) executes the full ToT-style chain.
   hard_question =f'''I am a sarcasm classification classifier. The task is to assign a correct label from ['Not Sarcastic', 'Sarcastic'] for the input text: {data_point}.'''
   prompt = PromptTemplate.from_template(hard_question)
 
@@ -43,7 +57,7 @@ def generate_ToT_prompt(llm, data_point):
 
 
 def eval_performance(y_true, y_pred, metric_path=None):
-
+    # Standard binary classification metrics; optionally persist summary JSON.
     # Precision
     metric_dict = {}
     precision = metrics.precision_score(y_true, y_pred)
@@ -109,6 +123,7 @@ def eval_performance(y_true, y_pred, metric_path=None):
 
 
 if __name__ == '__main__':
+    # Entry point: chunked inference + evaluation. `--token` is parsed but not passed to the endpoint here.
     parser = argparse.ArgumentParser(description='Running Tree-of-Thoughts based on GPT-4o for sarcasm detection.')
     # parser.add_argument('--dataset_name', metavar='D', type=str, help='dataset name', default='iacv2')
     parser.add_argument('--dataset_path', metavar='F', type=str, help='dataset path', default='datasets')
@@ -132,9 +147,11 @@ if __name__ == '__main__':
 
     df = pd.read_csv(dataset_path)
 
+    # Log message legacy naming: this step runs ToT generation per row, not cue extraction.
     logger.info('generating cues...')
 
 
+    # Split dataframe into chunks; each chunk can be resumed from `chunk_file_path` if present.
     chunk_size = int(np.ceil(len(df) / args.chunks))
     df_chunks = []
     for chunk_num in range(args.chunks):
@@ -153,6 +170,7 @@ if __name__ == '__main__':
             result = result.lower().strip()
             print("***********************************************")
             # print("result:",result)
+            # If the chain returns a structured answer, keep only the conclusion paragraph.
             match = re.search(r"(?i)\*\*conclusion\*\*:\n(.*)", result, re.DOTALL)
             if match:
                 result = match.group(1).strip()
@@ -162,6 +180,7 @@ if __name__ == '__main__':
             print("***********************************************")
             output_texts.append(result)
 
+            # Heuristic binary mapping aligned with other scripts in this repo.
             if re.search(r"\bnot sarcastic\b", result, re.IGNORECASE):
                 labels.append(0)
             else:
@@ -173,6 +192,7 @@ if __name__ == '__main__':
         df_chunks.append(df_chunk)
 
     logger.info("Evaluation....")
+    # Reassemble full predictions, remove intermediate chunk CSVs, then score against `Label`.
     df = pd.concat(df_chunks)
     df.to_csv(output_path, index=0)
     for i in range(args.chunks):
