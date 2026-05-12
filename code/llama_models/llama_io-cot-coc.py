@@ -193,6 +193,8 @@ if __name__ == '__main__':
     dataset_path = f'{args.dataset_path}/test_{task_name}.csv'
     output_path = f'{args.output_path}/{strategy}/output_{strategy}_{task_name}.csv' #f'output_toc_new/output_toc_'+ task_name +'.csv'# +'_wo_emo2.csv'
     metric_path = f'{args.metric_path}/{strategy}/metric_{strategy}_{task_name}.json' #f'output_toc_new/metric_toc_'+ task_name +'.json'# +'_wo_emo2.json'
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    os.makedirs(os.path.dirname(metric_path) or ".", exist_ok=True)
     # Legacy variable: retained from chunk-based scripts, but not used in this file.
     # chunks = args.chunks
     pipe = configure_pipeline()
