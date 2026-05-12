@@ -194,7 +194,7 @@ if __name__ == '__main__':
     output_path = f'{args.output_path}/{strategy}/output_{strategy}_{task_name}.csv' #f'output_toc_new/output_toc_'+ task_name +'.csv'# +'_wo_emo2.csv'
     metric_path = f'{args.metric_path}/{strategy}/metric_{strategy}_{task_name}.json' #f'output_toc_new/metric_toc_'+ task_name +'.json'# +'_wo_emo2.json'
     # Legacy variable: retained from chunk-based scripts, but not used in this file.
-    chunks = args.chunks
+    # chunks = args.chunks
     pipe = configure_pipeline()
 
     # Load test data and materialize prompts according to the selected strategy.
