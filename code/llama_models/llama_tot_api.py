@@ -10,6 +10,8 @@ Pipeline:
 
 Note: `HuggingFaceEndpoint` targets Meta-Llama-3-8B-Instruct; the CLI description string
 below still mentions GPT-4o historically.
+
+用的SmartLLMChain
 """
 
 import argparse

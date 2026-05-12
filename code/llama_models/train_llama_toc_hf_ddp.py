@@ -1,3 +1,18 @@
+"""
+Distributed training entry point for the LLaMA Tree-of-Cues (ToC) model (`ToC_llama` in `toc_llama_hf.py`).
+
+Workflow:
+1) Launch with `torchrun` (NCCL process group); each rank binds to one GPU via `LOCAL_RANK`.
+2) Load cue-augmented CSVs: `datasets_llama_toc/train_{task}_with_toc_cues.csv` and matching test split.
+3) `TextDataset` tokenizes three cue strings + a chat-formatted main prompt; labels become tokenizer
+   ids for `yes` / `no` (next-token style targets used with `CrossEntropyLoss` on LM logits).
+4) `Trainer` wraps the model in DDP, freezes backbone + `lm_head`, optimizes only trainable ToC modules.
+5) Each epoch: train with `DistributedSampler`, evaluate on test set, save predictions/metrics per epoch.
+
+Data expectations: rows include `linguistic/contextual/emotional_cue_processed`, cue prompt columns,
+`Text`, and `Label` (0/1). Output filenames embed `wo_lin` as a legacy naming tag.
+"""
+
 import torch
 import torch.distributed
 from torch.utils.data import DataLoader, Dataset, RandomSampler
@@ -30,6 +45,7 @@ from tqdm import tqdm
 from toc_llama_hf import ToC_llama
 
 class TextDataset(Dataset):
+    """One sample = three padded cue token sequences + padded chat prompt + binary label as yes/no token id."""
     def __init__(self, csv_file, tokenizer, max_seq_len, max_cue_len, yes_id,no_id):
         self.tokenizer = tokenizer
         self.data = pd.read_csv(csv_file, encoding_errors='ignore')
@@ -45,18 +61,21 @@ class TextDataset(Dataset):
     def __getitem__(self, idx):
         data_row = self.data.iloc[idx]
         all_cues, main_prompt = prepare_prompts(data_row)
+        # Batch-encode three cue texts -> (3, max_cue_len) after squeeze in collate; used by ToC branches.
         encoded_cues = self.tokenizer(all_cues, max_length=self.max_cue_len, padding='max_length', truncation=True, return_tensors="pt")
         encoded_prompts = self.tokenizer.apply_chat_template([{'role':'user','content':main_prompt}], add_generation_prompt=True, return_tensors="pt", padding='max_length', truncation=True, max_length=self.max_seq_len)
         encoded_prompt_mask = encoded_prompts != self.tokenizer.pad_token_id
         
         
         label = data_row['Label']
+        # Supervision: single target token id (yes/no) for CE loss on vocabulary logits at last position.
         label = self.yes_id if label == 1 else self.no_id
         
         return encoded_cues['input_ids'], encoded_cues['attention_mask'], encoded_prompts[0], encoded_prompt_mask[0], label
 
 
 def prepare_prompts(data_row, cue_types = ["linguistic", "contextual", "emotional"]):
+    """Strip boilerplate from stored cue fields and build the user message for sarcasm yes/no."""
     all_cues = []
     for cue_type in cue_types:
         cue_text = data_row[f'{cue_type}_cue_processed'].replace(data_row[f'{cue_type}_cue_prompt'],'')
@@ -75,6 +94,7 @@ def prepare_prompts(data_row, cue_types = ["linguistic", "contextual", "emotiona
     return all_cues, main_prompt
 
 class Trainer():
+    """DDP training loop, AdamW on trainable ToC parameters only, wandb logging on rank 0."""
     def __init__(self, 
                  task_name: str,
                  model_id: str = 'meta-llama/Meta-Llama-3-8B-Instruct',
@@ -91,14 +111,17 @@ class Trainer():
                  *args, 
                  **kwargs) -> None:
 
+        # Build frozen-backbone ToC wrapper; `max_cue_len` is stored on the module but batch shapes come from dataset.
         llama_model = ToC_llama(model_id=model_id,cache_dir = cache_dir, cue_types = cue_types, max_cue_len = max_cue_len)
         self.yes_id = llama_model.tokenizer.encode('yes')[-1]
         self.no_id  = llama_model.tokenizer.encode('no')[-1]
+        # Match toc_llama_hf: no gradient into pretrained decoder; train cue adapters only.
         for param in llama_model.llama.model.parameters():
             param.requires_grad = False
         for name, param in llama_model.named_parameters():
             if param.requires_grad == True:
                 print(f'{name}: {param.requires_grad}')
+        # Keep output projection fixed so optimization focuses on cue fusion / prefix path.
         llama_model.llama.lm_head.weight.requires_grad = False
 
         rank = torch.distributed.get_rank()
@@ -114,6 +137,7 @@ class Trainer():
 
         train_dataset = TextDataset(train_file_name,self.tokenizer, max_seq_len, max_cue_len, self.yes_id, self.no_id)
         
+        # Shard training samples across ranks; call `set_epoch` each epoch for proper shuffling.
         self.train_sampler = DistributedSampler(train_dataset, shuffle=True)
         #self.train_sampler = RandomSampler(train_dataset)
         #self.train_sampler = None
@@ -131,6 +155,7 @@ class Trainer():
                                           shuffle=(self.test_sampler is None), 
                                           sampler=self.test_sampler)
 
+        # Labels are scalar token ids; logits are flattened to (B, vocab) in forward_step.
         self.loss_fct = nn.CrossEntropyLoss()
         trainable_params = [param for param in self.llama_model.parameters() if param.requires_grad]
         self.optimizer = AdamW(params = trainable_params,
@@ -140,7 +165,7 @@ class Trainer():
         self.num_epoch = num_epoch
 
     def train(self):
-        
+        """Alternating full pass over train DataLoader and test_step per epoch."""
         for epoch in range(self.num_epoch):
             total_train_loss = self.train_step(
                                         epoch = epoch, 
@@ -159,6 +184,7 @@ class Trainer():
             
         
     def forward_step(self, batch):
+        """Forward ToC_llama, reshape logits for CE against yes/no token ids."""
         cue_ids, cue_masks, prompt_ids, prompt_masks, labels = batch
         self.device = torch.device('cuda')
         #self.device = torch.device('cpu')
@@ -174,6 +200,7 @@ class Trainer():
         return pred, loss
         
     def train_step(self, epoch, num_epochs):
+        # Required for DistributedSampler to reshuffle partition each epoch.
         self.train_dataloader.sampler.set_epoch(epoch)
         train_loss_sum = []
         progress_bar = tqdm(self.train_dataloader, desc=f"Training Epoch {epoch+1}/{num_epochs}")
@@ -194,6 +221,7 @@ class Trainer():
         return np.mean(train_loss_sum)
 
     def test_step(self, epoch, num_epochs):
+        """Decode prompts for CSV logging, aggregate preds, run sklearn metrics (all ranks compute; wandb on rank 0)."""
         test_loss_sum = []
         pred_list = []
         label_list = []
@@ -227,7 +255,8 @@ class Trainer():
         return test_loss_avg
 
     def criterion(self, pred_embedding, label_embedding):
-        # This criterion is not used in training
+                # This criterion is not used in training
+        # Unused legacy helper; training uses CrossEntropyLoss on token logits.
         dist_to_truth = F.pairwise_distance(pred_embedding, label_embedding)
         loss = torch.pow(dist_to_truth, 2)
         loss = torch.mean(loss)
@@ -303,7 +332,7 @@ class Trainer():
 def set_up(
         seed: int = 1,
         ):
-    
+    """Initialize NCCL process group and pin this process to `LOCAL_RANK` GPU. Non-zero ranks mute stdout."""
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     print('world_size:',world_size)
@@ -316,7 +345,7 @@ def set_up(
     
 
 if __name__ == "__main__":
-
+    # Intended usage: `torchrun --nproc_per_node=N train_llama_toc_hf_ddp.py ...`
     print(torch.cuda.is_available())
     if torch.cuda.is_available():
         device_count = torch.cuda.device_count()
