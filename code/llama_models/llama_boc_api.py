@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 def configure_pipeline(token):
     # Use HuggingFaceEndpoint via LangChain to run remote text generation.
     llm = HuggingFaceEndpoint(
-    repo_id="meta-llama/Meta-Llama-3-8B-Instruct:novita",
+    repo_id="meta-llama/Meta-Llama-3-8B-Instruct",
     task="text-generation",
     do_sample=False,
     huggingfacehub_api_token=token, 
@@ -282,7 +282,7 @@ if __name__ == '__main__':
                     if args.debug:
                         logger.exception("Generation failed")
                     else:
-                        logger.warning("Generation failed: %s", e)
+                        logger.warning("Generation failed: %s", e) # Generation failed: 'InferenceClient' object has no attribute 'post'  huggingface-hub==0.23.3
                     detail = str(e).strip() or repr(e)
                     output_texts.append(
                         f"Error in generation! ({detail})" if args.debug else "Error in generation!"
