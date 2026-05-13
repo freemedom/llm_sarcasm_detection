@@ -245,6 +245,9 @@ if __name__ == '__main__':
     
     # Chunk-level processing supports partial resume and prevents losing full-run progress.
     chunk_size = int(np.ceil(len(df) / chunks))
+    out_dir = os.path.dirname(output_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
     df_chunks = []
     for chunk_num in range(chunks):
         logger.info('processing chunk {}...'.format(chunk_num))
