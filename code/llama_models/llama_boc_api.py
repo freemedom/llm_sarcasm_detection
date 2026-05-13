@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 def configure_pipeline(token):
     # Use HuggingFaceEndpoint via LangChain to run remote text generation.
     llm = HuggingFaceEndpoint(
-    repo_id="meta-llama/Meta-Llama-3-8B-Instruct",
+    repo_id="meta-llama/Meta-Llama-3-8B-Instruct:novita",
     task="text-generation",
     do_sample=False,
     huggingfacehub_api_token=token, 
