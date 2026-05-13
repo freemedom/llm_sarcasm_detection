@@ -43,7 +43,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
                     datefmt='%m/%d/%Y %H:%M:%S',
-                    level=logging.INFO)
+                    level=logging.INFO) # 打印出时间了
 logger = logging.getLogger(__name__)
 
 def configure_pipeline(token):
@@ -194,6 +194,11 @@ if __name__ == '__main__':
     parser.add_argument('--token', metavar='K', type=str, help='token', default=None)
     parser.add_argument('--ablation_type', metavar='A', type=str, help='ablation type', default=None)
     parser.add_argument('--strategy', metavar='S', type=str, help='prompting strategy', default='boc')
+    parser.add_argument(
+        '--debug',
+        action='store_true',
+        help='On generation failure: log full traceback (see stderr / log for HTTP/API details).',
+    )
 
     args = parser.parse_args()
     ablation_type = args.ablation_type
@@ -273,8 +278,15 @@ if __name__ == '__main__':
                     else:
                         labels.append(1)
                     output_texts.append(result)
-                except:
-                    output_texts.append("Error in generation!")
+                except Exception as e:
+                    if args.debug:
+                        logger.exception("Generation failed")
+                    else:
+                        logger.warning("Generation failed: %s", e)
+                    detail = str(e).strip() or repr(e)
+                    output_texts.append(
+                        f"Error in generation! ({detail})" if args.debug else "Error in generation!"
+                    )
                     labels.append(0)
 
                 
