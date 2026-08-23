@@ -1,6 +1,90 @@
 """
 LLaMA sarcasm inference script for three prompting strategies: IO, CoT, and CoC.
 
+Role in the project
+-------------------
+This file covers the "simple prompting" baselines used in the SarcasmCue paper /
+repo for Meta-Llama-3-8B-Instruct. Unlike GoC/BoC (cue pools + multi-pass voting)
+or ToC (trainable cue fusion), this script is single-pass prompt → generate →
+parse label. It is the entry point for comparing:
+  - IO  (Input-Output / standard prompting)
+  - CoT (Chain-of-Thought)
+  - CoC (Chain of Contradiction; paper method that contrasts surface sentiment
+        vs. true intention)
+
+High-level pipeline
+-------------------
+1) Load a test split from `{dataset_path}/test_{task_name}.csv`
+   (default: `datasets/test_{task_name}.csv`). Expected columns include at least
+   `Text` (input utterance) and `Label` (0/1 ground truth).
+2) For each row, build a chat-style user message whose content is a strategy-
+   specific instruction string (`generate_IO_prompt` / `generate_CoT_prompt` /
+   `generate_CoC_prompt`). Prompts are stored as
+   `[{'role': 'user', 'content': ...}]` so the HF chat template can be applied.
+3) Load `meta-llama/Meta-Llama-3-8B-Instruct` locally via
+   `AutoModelForCausalLM` + `pipeline("text-generation")` (`configure_pipeline`),
+   with `device_map="auto"` and float16.
+4) Run batched generation over the Dataset column `"prompt"`
+   (`batch_size=64`, sampling: `temperature=0.6`, `top_p=0.9`,
+   `max_new_tokens=256`). Stop on EOS / `<|eot_id|>`.
+5) Parse the last assistant turn's free-form text into a binary prediction:
+   if the output matches the word boundary pattern `not sarcastic` (case-
+   insensitive) → label 0; otherwise → label 1.
+6) Write per-sample outputs and evaluate against `Label`
+   (Precision / Recall / Accuracy / F1 variants / ROC-AUC / confusion matrix).
+
+Prompt strategy details
+-----------------------
+- IO:  Direct classification; ask only for the label
+       ['Not Sarcastic', 'Sarcastic'] with no intermediate reasoning.
+- CoT: Ask the model to "think step by step" before producing a label
+       (open-ended reasoning; no fixed sarcasm-specific steps).
+- CoC: Paper-style Chain of Contradiction. The model may answer directly if
+       confident; otherwise it follows three fixed steps:
+         (1) surface sentiment cues,
+         (2) true intention (rhetoric / style / etc.),
+         (3) compare (1) vs (2) to decide sarcasm.
+       Note: this differs from GoC/BoC, which enumerate a larger cue pool.
+
+CLI arguments
+-------------
+  --task_name     Dataset key used in filenames (default: iacv2).
+                  Typical values: iacv1, iacv2, semeval, mustard.
+  --dataset_path  Directory containing `test_{task_name}.csv` (default: datasets).
+  --output_path   Root for prediction CSVs (default: llama_output).
+  --metric_path   Root for metric JSONs (default: llama_output).
+  --strategy      One of: io | cot | coc (default: coc).
+
+Outputs
+-------
+  {output_path}/{strategy}/output_{strategy}_{task_name}.csv
+      Adds columns `prompt`, `llm_output` (raw generation), `pred` (0/1).
+  {metric_path}/{strategy}/metric_{strategy}_{task_name}.json
+      Aggregate classification metrics from `eval_performance`.
+
+Example
+-------
+  python code/llama_models/llama_io-cot-coc.py --task_name iacv2 --strategy coc
+
+Caveats
+-------
+- Label parsing is regex-based and biased toward "sarcastic" (1) whenever the
+  exact phrase "not sarcastic" is absent; noisy generations can flip labels.
+- Sampling is on (`do_sample=True`), so runs are not fully deterministic.
+- `get_random_cues` is unused here (leftover from cue-based siblings).
+- Model weights are expected under `cache_dir='/root/autodl-tmp/llama/original'`
+  (data disk; system disk is too small for 8B weights). Hugging Face access for
+  Llama-3 Instruct may be required.
+
+
+
+old comments:
+
+Expected label mapping:
+- "not sarcastic" -> 0
+- otherwise       -> 1
+
+
 High-level pipeline:
 1) Load a test split from `datasets/test_{task_name}.csv`.
 2) Build a strategy-specific prompt per sample (`io`, `cot`, or `coc`).
@@ -8,9 +92,6 @@ High-level pipeline:
 4) Convert free-form outputs into binary labels via regex matching.
 5) Save predictions and compute classification metrics.
 
-Expected label mapping:
-- "not sarcastic" -> 0
-- otherwise       -> 1
 """
 
 import pandas as pd
@@ -37,8 +118,8 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 def configure_pipeline():
     # Initialize local LLaMA-Instruct model and tokenizer for generation.
-    tokenizer = AutoTokenizer.from_pretrained('meta-llama/Meta-Llama-3-8B-Instruct',cache_dir = 'llama/original')
-    model = AutoModelForCausalLM.from_pretrained('meta-llama/Meta-Llama-3-8B-Instruct', cache_dir = 'llama/original')
+    tokenizer = AutoTokenizer.from_pretrained('meta-llama/Meta-Llama-3-8B-Instruct', cache_dir='/root/autodl-tmp/llama/original')
+    model = AutoModelForCausalLM.from_pretrained('meta-llama/Meta-Llama-3-8B-Instruct', cache_dir='/root/autodl-tmp/llama/original')
 
     pipe = pipeline(
         "text-generation",
