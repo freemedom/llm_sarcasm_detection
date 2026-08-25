@@ -72,9 +72,10 @@ Caveats
   exact phrase "not sarcastic" is absent; noisy generations can flip labels.
 - Sampling is on (`do_sample=True`), so runs are not fully deterministic.
 - `get_random_cues` is unused here (leftover from cue-based siblings).
-- Model weights are expected under `cache_dir='/root/autodl-tmp/llama/original'`
-  (data disk; system disk is too small for 8B weights). Hugging Face access for
-  Llama-3 Instruct may be required.
+- Model weights default to `cache_dir='/root/autodl-tmp/llama/original'`
+  (override with env `LLAMA_CACHE_DIR`). Set `HF_HUB_OFFLINE=1` to force
+  local-only load. GPU placement uses `device_map='auto'` in
+  `from_pretrained` (not only in `pipeline`), so weights land on CUDA.
 
 
 
@@ -117,16 +118,30 @@ import torch
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 def configure_pipeline():
-    # Initialize local LLaMA-Instruct model and tokenizer for generation.
-    tokenizer = AutoTokenizer.from_pretrained('meta-llama/Meta-Llama-3-8B-Instruct', cache_dir='/root/autodl-tmp/llama/original')
-    model = AutoModelForCausalLM.from_pretrained('meta-llama/Meta-Llama-3-8B-Instruct', cache_dir='/root/autodl-tmp/llama/original')
+    # Load LLaMA-Instruct onto GPU at from_pretrained time.
+    # Passing device_map only to pipeline(model=<already built>) is ignored by
+    # recent transformers and leaves the model on CPU (high RAM, ~0 GPU use).
+    cache_dir = os.environ.get("LLAMA_CACHE_DIR", "/root/autodl-tmp/llama/original")
+    local_only = os.environ.get("HF_HUB_OFFLINE", "0") == "1" or os.environ.get(
+        "TRANSFORMERS_OFFLINE", "0"
+    ) == "1"
+    tokenizer = AutoTokenizer.from_pretrained(
+        "meta-llama/Meta-Llama-3-8B-Instruct",
+        cache_dir=cache_dir,
+        local_files_only=local_only,
+    )
+    model = AutoModelForCausalLM.from_pretrained(
+        "meta-llama/Meta-Llama-3-8B-Instruct",
+        cache_dir=cache_dir,
+        local_files_only=local_only,
+        torch_dtype=torch.float16,
+        device_map="auto",
+    )
 
     pipe = pipeline(
         "text-generation",
         model=model,
         tokenizer=tokenizer,
-        torch_dtype=torch.float16,
-        device_map="auto",
     )
     pipe.tokenizer.pad_token_id = model.config.eos_token_id
 
