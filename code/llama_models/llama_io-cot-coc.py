@@ -324,7 +324,7 @@ if __name__ == '__main__':
     
     # Batch inference over prompts; parse textual outputs into binary predictions.
     for out in tqdm(pipe(KeyDataset(dataset, "prompt"),  
-                         batch_size=64, 
+                         batch_size=8,
                          do_sample=True,
                          temperature=0.6,
                          top_p=0.9,
